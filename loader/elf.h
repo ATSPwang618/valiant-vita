@@ -1,3 +1,13 @@
+/* 
+ * ELF文件格式定义头文件
+ * 
+ * 本文件定义了标准的ELF（可执行和链接格式）类型、结构体和宏定义
+ * ELF是Unix和类Unix系统（包括Linux和Android）中可执行文件、
+ * 共享对象文件和核心转储文件的标准文件格式
+ * 
+ * 此文件包含GNU C库的ELF定义，用于解析Android SO文件
+ */
+
 /* This file defines standard ELF types, structures, and macros.
    Copyright (C) 1995-2018 Free Software Foundation, Inc.
    This file is part of the GNU C Library.
