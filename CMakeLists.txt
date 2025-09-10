@@ -125,7 +125,7 @@ target_link_libraries(valiant
   SceMotion_stub           # 运动传感器
   SceHid_stub              # 人机接口设备
   SceVshBridge_stub        # VSH桥接
-  SceKernelDmacmgr_stub    # DMA控制器
+  SceKernelDmacMgr_stub    # DMA控制器
 )
 
 # 生成PS Vita可执行文件
