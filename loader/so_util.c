@@ -443,19 +443,26 @@ int so_relocate(so_module *mod) {
 	return 0;
 }
 
+// 从依赖模块中解析符号链接
+// 在模块的依赖库中查找指定符号的地址
+// 参数：mod - 请求符号的模块，symbol - 符号名称
+// 返回值：符号地址，未找到返回0
 uintptr_t so_resolve_link(so_module *mod, const char *symbol) {
+	// 遍历动态段，查找依赖库信息
 	for (int i = 0; i < mod->num_dynamic; i++) {
 		switch (mod->dynamic[i].d_tag) {
 		case DT_NEEDED:
 		{
+			// 在已加载的模块链表中查找依赖库
 			so_module *curr = head;
 			while (curr) {
+				// 比较SO名称，排除当前模块自身
 				if (curr != mod && strcmp(curr->soname, mod->dynstr + mod->dynamic[i].d_un.d_ptr) == 0) {
 					uintptr_t link = so_symbol(curr, symbol);
 					if (link)
-						return link;
+						return link; // 找到符号，返回地址
 				}
-				curr = curr->next;
+				curr = curr->next; // 继续检查下一个模块
 			}
 
 			break;
@@ -465,15 +472,19 @@ uintptr_t so_resolve_link(so_module *mod, const char *symbol) {
 		}
 	}
 
-	return 0;
+	return 0; // 未找到符号
 }
 
+// 重定位错误处理函数
+// 当无法找到符号时，显示详细的错误信息并终止程序
+// 参数：got0 - 发生错误的GOT表地址
 void reloc_err(uintptr_t got0)
 {
-	// Find to which module this missing symbol belongs
+	// 查找这个缺失符号属于哪个模块
 	int found = 0;
 	so_module *curr = head;
 	while (curr && !found) {
+		// 检查地址是否在当前模块的数据段范围内
 		for (int i = 0; i < curr->n_data; i++)
 			if ((got0 >= curr->data_base[i]) && (got0 <= (uintptr_t)(curr->data_base[i] + curr->data_size[i])))
 				found = 1;
@@ -483,7 +494,7 @@ void reloc_err(uintptr_t got0)
 	}
 
 	if (curr) {
-		// Attempt to find symbol name and then display error
+		// 尝试找到符号名称，然后显示错误信息
 		for (int i = 0; i < curr->num_reldyn + curr->num_relplt; i++) {
 			Elf32_Rel *rel = i < curr->num_reldyn ? &curr->reldyn[i] : &curr->relplt[i - curr->num_reldyn];
 			Elf32_Sym *sym = &curr->dynsym[ELF32_R_SYM(rel->r_info)];
@@ -502,17 +513,25 @@ void reloc_err(uintptr_t got0)
 		}
 	}
 
-	// Ooops, this shouldn't have happened.
+	// 糟糕，这不应该发生
 	fatal_error("Unknown symbol \"???\" (%p).\n", (void*)got0);
 }
 
+// PLT0存根函数：处理未解析符号的跳转
+// 当程序尝试调用未解析的函数时，会跳转到这里并报告错误
+// 使用内联汇编获取GOT表中的地址，然后调用错误处理函数
 __attribute__((naked)) void plt0_stub()
 {
-	register uintptr_t got0 asm("r12");
-	reloc_err(got0);
+	register uintptr_t got0 asm("r12"); // r12寄存器包含GOT表地址
+	reloc_err(got0); // 调用错误处理函数
 }
 
+// 解析SO模块的未定义符号
+// 将模块中的未定义符号与提供的符号库进行链接
+// 参数：mod - 目标模块，default_dynlib - 默认符号库，size_default_dynlib - 符号库大小，default_dynlib_only - 是否仅使用默认库
+// 返回值：成功返回0，失败返回负值
 int so_resolve(so_module *mod, so_default_dynlib *default_dynlib, int size_default_dynlib, int default_dynlib_only) {
+	// 遍历所有重定位条目（包括数据重定位和PLT重定位）
 	for (int i = 0; i < mod->num_reldyn + mod->num_relplt; i++) {
 		Elf32_Rel *rel = i < mod->num_reldyn ? &mod->reldyn[i] : &mod->relplt[i - mod->num_reldyn];
 		Elf32_Sym *sym = &mod->dynsym[ELF32_R_SYM(rel->r_info)];
@@ -520,45 +539,50 @@ int so_resolve(so_module *mod, so_default_dynlib *default_dynlib, int size_defau
 
 		int type = ELF32_R_TYPE(rel->r_info);
 		switch (type) {
-		case R_ARM_ABS32:
-		case R_ARM_GLOB_DAT:
-		case R_ARM_JUMP_SLOT:
+		case R_ARM_ABS32:      // 绝对地址重定位
+		case R_ARM_GLOB_DAT:   // 全局数据重定位
+		case R_ARM_JUMP_SLOT:  // 函数跳转槽重定位
 		{
-			if (sym->st_shndx == SHN_UNDEF) {
+			if (sym->st_shndx == SHN_UNDEF) { // 未定义符号
 				int resolved = 0;
+				
+				// 首先尝试从依赖模块中解析符号
 				if (!default_dynlib_only) {
 					uintptr_t link = so_resolve_link(mod, mod->dynstr + sym->st_name);
 					if (link) {
 						// debugPrintf("Resolved from dependencies: %s\n", mod->dynstr + sym->st_name);
 						if (type == R_ARM_ABS32)
-							*ptr += link;
+							*ptr += link;  // 绝对地址：加上链接地址
 						else
-							*ptr = link;
+							*ptr = link;   // 其他类型：直接设置为链接地址
 						resolved = 1;
 					}
 				}
 
+				// 然后在默认符号库中查找
 				for (int j = 0; j < size_default_dynlib / sizeof(so_default_dynlib); j++) {
 					if (strcmp(mod->dynstr + sym->st_name, default_dynlib[j].symbol) == 0) {
-						*ptr = default_dynlib[j].func;
+						*ptr = default_dynlib[j].func; // 设置为默认库中的函数地址
 						resolved = 1;
 						break;
 					}
 				}
 				
+				// 最后尝试从VitaGL中获取OpenGL函数
 				if (!resolved) {
 					void *f = vglGetProcAddress(mod->dynstr + sym->st_name);
 					if (f) {
-						*ptr = f;
+						*ptr = f;  // 设置为OpenGL函数地址
 						resolved = 1;
 						break;
 					}
 				}
 
+				// 如果还是无法解析
 				if (!resolved) {
 					if (type == R_ARM_JUMP_SLOT) {
 						printf("Unresolved import: %s\n", mod->dynstr + sym->st_name);
-						*ptr = (uintptr_t)&plt0_stub;
+						*ptr = (uintptr_t)&plt0_stub; // 跳转槽：设置为错误处理存根
 					}
 					else {
 						//printf("Unresolved import: %s\n", mod->dynstr + sym->st_name);
@@ -573,10 +597,15 @@ int so_resolve(so_module *mod, so_default_dynlib *default_dynlib, int size_defau
 		}
 	}
 
-	return 0;
+	return 0; // 成功
 }
 
+// 使用虚拟占位符解析SO模块符号
+// 对于找不到的符号，使用返回0的虚拟函数避免链接失败
+// 参数：mod - 目标模块，default_dynlib - 默认符号库，size_default_dynlib - 符号库大小，default_dynlib_only - 是否仅使用默认库
+// 返回值：成功返回0，失败返回负值
 int so_resolve_with_dummy(so_module *mod, so_default_dynlib *default_dynlib, int size_default_dynlib, int default_dynlib_only) {
+	// 遍历所有重定位条目
 	for (int i = 0; i < mod->num_reldyn + mod->num_relplt; i++) {
 		Elf32_Rel *rel = i < mod->num_reldyn ? &mod->reldyn[i] : &mod->relplt[i - mod->num_reldyn];
 		Elf32_Sym *sym = &mod->dynsym[ELF32_R_SYM(rel->r_info)];
@@ -584,14 +613,15 @@ int so_resolve_with_dummy(so_module *mod, so_default_dynlib *default_dynlib, int
 
 		int type = ELF32_R_TYPE(rel->r_info);
 		switch (type) {
-		case R_ARM_ABS32:
-		case R_ARM_GLOB_DAT:
-		case R_ARM_JUMP_SLOT:
+		case R_ARM_ABS32:      // 绝对地址重定位
+		case R_ARM_GLOB_DAT:   // 全局数据重定位
+		case R_ARM_JUMP_SLOT:  // 函数跳转槽重定位
 		{
-			if (sym->st_shndx == SHN_UNDEF) {
+			if (sym->st_shndx == SHN_UNDEF) { // 未定义符号
+				// 在默认符号库中查找，如果找到就设置为虚拟函数(ret0)
 				for (int j = 0; j < size_default_dynlib / sizeof(so_default_dynlib); j++) {
 					if (strcmp(mod->dynstr + sym->st_name, default_dynlib[j].symbol) == 0) {
-						*ptr = &ret0;
+						*ptr = &ret0; // 设置为返回0的虚拟函数
 						break;
 					}
 				}
@@ -604,107 +634,130 @@ int so_resolve_with_dummy(so_module *mod, so_default_dynlib *default_dynlib, int
 		}
 	}
 
-	return 0;
+	return 0; // 成功
 }
 
+// 初始化已加载的SO模块
+// 调用模块的初始化函数数组中的所有函数
+// 参数：mod - 目标模块
 void so_initialize(so_module *mod) {
+	// 遍历并调用所有初始化函数
 	for (int i = 0; i < mod->num_init_array; i++) {
 		if (mod->init_array[i])
-			mod->init_array[i]();
+			mod->init_array[i](); // 调用初始化函数
 	}
 }
 
+// 计算符号名的哈希值
+// 使用ELF标准的哈希算法计算符号名的哈希值
+// 参数：name - 符号名称字符串
+// 返回值：32位哈希值
 uint32_t so_hash(const uint8_t *name) {
 	uint64_t h = 0, g;
 	while (*name) {
-		h = (h << 4) + *name++;
+		h = (h << 4) + *name++;  // 左移4位并加上当前字符
 		if ((g = (h & 0xf0000000)) != 0)
-			h ^= g >> 24;
-		h &= 0x0fffffff;
+			h ^= g >> 24;        // 如果高4位非零，进行异或操作
+		h &= 0x0fffffff;         // 清除高4位
 	}
 	return h;
 }
 
+// 根据符号名查找符号在动态符号表中的索引
+// 首先使用哈希表加速查找，如果没有哈希表则线性搜索
+// 参数：mod - 目标模块，symbol - 符号名称
+// 返回值：符号索引，未找到返回-1
 static int so_symbol_index(so_module *mod, const char *symbol)
 {
 	if (mod->hash) {
+		// 使用哈希表进行快速查找
 		uint32_t hash = so_hash((const uint8_t *)symbol);
-		uint32_t nbucket = mod->hash[0];
-		uint32_t *bucket = &mod->hash[2];
-		uint32_t *chain = &bucket[nbucket];
+		uint32_t nbucket = mod->hash[0];      // 哈希桶数量
+		uint32_t *bucket = &mod->hash[2];     // 哈希桶数组
+		uint32_t *chain = &bucket[nbucket];   // 链表数组
+		
+		// 在对应的哈希桶中查找符号
 		for (int i = bucket[hash % nbucket]; i; i = chain[i]) {
 			if (mod->dynsym[i].st_shndx == SHN_UNDEF)
-				continue;
+				continue; // 跳过未定义符号
 			if (mod->dynsym[i].st_info != SHN_UNDEF && strcmp(mod->dynstr + mod->dynsym[i].st_name, symbol) == 0)
-				return i;
+				return i; // 找到匹配的符号
 		}
 	}
 
+	// 如果没有哈希表或哈希查找失败，进行线性搜索
 	for (int i = 0; i < mod->num_dynsym; i++) {
 		if (mod->dynsym[i].st_shndx == SHN_UNDEF)
-			continue;
+			continue; // 跳过未定义符号
 		if (mod->dynsym[i].st_info != SHN_UNDEF && strcmp(mod->dynstr + mod->dynsym[i].st_name, symbol) == 0)
-			return i;
+			return i; // 找到匹配的符号
 	}
 
-	return -1;
+	return -1; // 未找到符号
 }
 
 /*
- * alloc_arena: allocates space on either patch or cave arenas, 
- * range: maximum range from allocation to dst (ignored if NULL)
- * dst: destination address
-*/
+ * 内存区域分配函数：在补丁区域或代码洞穴中分配空间
+ * 参数：so - SO模块，range - 与目标地址的最大距离（NULL表示忽略），dst - 目标地址，sz - 所需大小
+ * 返回值：分配的地址，失败返回NULL
+ */
 static uintptr_t so_alloc_arena(so_module *so, uintptr_t range, uintptr_t dst, size_t sz) {
-	// Is address in range?
+	// 检查地址是否在范围内的宏
 	#define inrange(lsr, gtr, range) \
 		(((uintptr_t)(range) == (uintptr_t)NULL) || ((uintptr_t)(range) >= ((uintptr_t)(gtr) - (uintptr_t)(lsr))))
-	// Space left on block
+	// 计算块中剩余空间的宏
 	#define blkavail(type) (so->type##_size - (so->type##_head - so->type##_base))
 	
-	// keep allocations 4-byte aligned for simplicity
+	// 保持4字节对齐，简化分配过程
 	sz = ALIGN_MEM(sz, 4);
 
+	// 首先尝试在补丁区域分配
 	if (sz <= (blkavail(patch)) && inrange(so->patch_base, dst, range)) {
 		so->patch_head += sz;
 		return (so->patch_head - sz);
-	} else if (sz <= (blkavail(cave)) && inrange(dst, so->cave_base, range)) {
+	} 
+	// 然后尝试在代码洞穴区域分配
+	else if (sz <= (blkavail(cave)) && inrange(dst, so->cave_base, range)) {
 		so->cave_head += sz;
 		return (so->cave_head - sz);
 	}
 
-	return (uintptr_t)NULL;
+	return (uintptr_t)NULL; // 分配失败
 }
 
+// LDMIA指令跳转代码生成函数
+// 为有问题的LDMIA指令生成等价的跳转代码，避免对齐问题
+// 参数：mod - SO模块，dst - 目标指令地址
 static void trampoline_ldm(so_module *mod, uint32_t *dst) {
-	uint32_t trampoline[1];
-	uint32_t funct[20] = {0xFAFAFAFA};
+	uint32_t trampoline[1];           // 跳转指令缓冲区
+	uint32_t funct[20] = {0xFAFAFAFA}; // 替换函数缓冲区
 	uint32_t *ptr = funct;
 
-	int cur = 0;
-	int baseReg = ((*dst) >> 16) & 0xF;
-	int bitMask = (*dst) & 0xFFFF;
+	int cur = 0;                                    // 当前偏移量
+	int baseReg = ((*dst) >> 16) & 0xF;            // 基址寄存器编号
+	int bitMask = (*dst) & 0xFFFF;                 // 寄存器位掩码
 
 	uint32_t stored = NULL;
+	// 遍历位掩码，为每个需要加载的寄存器生成LDR指令
 	for (int i = 0; i < 16; i++) {
 		if (bitMask & (1 << i)) {
-			// If the register we're reading the offset from is the same as the one we're writing,
-			// delay it to the very end so that the base pointer ins't clobbered
+			// 如果读取偏移的寄存器与要写入的寄存器相同，
+			// 延迟到最后处理，避免破坏基址指针
 			if (baseReg == i)
 				stored = LDR_OFFS(i, baseReg, cur).raw;
 			else
-				*ptr++ = LDR_OFFS(i, baseReg, cur).raw;
-			cur += 4;
+				*ptr++ = LDR_OFFS(i, baseReg, cur).raw; // 生成LDR指令
+			cur += 4; // 更新偏移量
 		}
 	}
 
-	// Perform the delayed load if needed
+	// 执行延迟的加载操作（如果需要）
 	if (stored) {
 		*ptr++ = stored;
 	}
 
-	*ptr++ = 0xe51ff004; // LDR PC, [PC, -0x4] ; jmp to [dst+0x4]
-	*ptr++ = dst+1; // .dword <...>	; [dst+0x4]
+	*ptr++ = 0xe51ff004; // LDR PC, [PC, -0x4] ; 跳转到[dst+0x4]
+	*ptr++ = dst+1;      // .dword <...>	; [dst+0x4]
 
 	size_t trampoline_sz =	((uintptr_t)ptr - (uintptr_t)&funct[0]);
 	uintptr_t patch_addr = so_alloc_arena(mod, B_RANGE, B_OFFSET(dst), trampoline_sz);
@@ -713,40 +766,49 @@ static void trampoline_ldm(so_module *mod, uint32_t *dst) {
 		fatal_error("Failed to patch LDMIA at 0x%08X, unable to allocate space.\n", dst);
 	}
 	
-	// Create sign extended relative address rel_addr
+	// 创建符号扩展的相对地址 rel_addr
 	trampoline[0] = B(dst, patch_addr).raw;
 
+	// 复制跳转代码到分配的空间，并安装跳转指令
 	kuKernelCpuUnrestrictedMemcpy((void*)patch_addr, funct, trampoline_sz);
 	kuKernelCpuUnrestrictedMemcpy(dst, trampoline, sizeof(trampoline));
 }
 
+// 根据符号名获取符号地址
+// 在模块的动态符号表中查找指定符号并返回其地址
+// 参数：mod - 目标模块，symbol - 符号名称
+// 返回值：符号地址，未找到返回NULL
 uintptr_t so_symbol(so_module *mod, const char *symbol) {
 	int index = so_symbol_index(mod, symbol);
 	if (index == -1)
-		return NULL;
+		return NULL; // 未找到符号
 
-	return mod->text_base + mod->dynsym[index].st_value;
+	return mod->text_base + mod->dynsym[index].st_value; // 返回符号的绝对地址
 }
 
+// 修复符号中的LDMIA指令对齐问题
+// 扫描指定符号的代码，查找并修复可能引起对齐问题的LDMIA指令
+// 参数：mod - 目标模块，symbol - 符号名称
 void so_symbol_fix_ldmia(so_module *mod, const char *symbol) {
-	// This is meant to work around crashes due to unaligned accesses (SIGBUS :/) due to certain
-	// kernels not having the fault trap enabled, e.g. certain RK3326 Odroid Go Advance clone distros.
-	// TODO:: Maybe enable this only with a config flag? maybe with a list of known broken functions?
-	// Known to trigger on GM:S's "_Z11Shader_LoadPhjS_" - if it starts happening on other places,
-	// might be worth enabling it globally.
+	// 这个函数用于解决由于未对齐访问导致的崩溃问题（SIGBUS）
+	// 某些内核没有启用故障陷阱，例如某些RK3326 Odroid Go Advance克隆发行版
+	// TODO:: 也许只在配置标志下启用？也许使用已知有问题的函数列表？
+	// 已知在GM:S的"_Z11Shader_LoadPhjS_"中触发 - 如果在其他地方也发生，
+	// 可能值得全局启用。
 	
 	int idx = so_symbol_index(mod, symbol);
 	if (idx == -1)
-		return;
+		return; // 未找到符号
 
 	uintptr_t st_addr = mod->text_base + mod->dynsym[idx].st_value;
+	// 扫描符号代码范围内的每个指令
 	for (uintptr_t addr = st_addr; addr < st_addr + mod->dynsym[idx].st_size; addr+=4) {
 		uint32_t inst = *(uint32_t*)(addr);
 		
-		//Is this an LDMIA instruction with a R0-R12 base register?
+		// 检查是否为带有R0-R12基址寄存器的LDMIA指令
 		if (((inst & 0xFFF00000) == 0xE8900000) && (((inst >> 16) & 0xF) < 13) ) {
 			sceClibPrintf("Found possibly misaligned LDMIA on 0x%08X, trying to fix it... (instr: 0x%08X, to 0x%08X)\n", addr, *(uint32_t*)addr, mod->patch_head);
-			trampoline_ldm(mod, addr);
+			trampoline_ldm(mod, addr); // 生成修复代码
 		}
 	}
 }

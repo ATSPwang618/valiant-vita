@@ -8,46 +8,45 @@
  * 此文件包含GNU C库的ELF定义，用于解析Android SO文件
  */
 
-/* This file defines standard ELF types, structures, and macros.
-   Copyright (C) 1995-2018 Free Software Foundation, Inc.
-   This file is part of the GNU C Library.
+/* 原始GNU C库版权声明：
+   本文件定义了标准的ELF类型、结构体和宏定义。
+   版权所有 (C) 1995-2018 自由软件基金会
+   此文件是GNU C库的一部分。
 
-   The GNU C Library is free software; you can redistribute it and/or
-   modify it under the terms of the GNU Lesser General Public
-   License as published by the Free Software Foundation; either
-   version 2.1 of the License, or (at your option) any later version.
+   GNU C库是自由软件；您可以重新分发和/或修改它
+   根据自由软件基金会发布的GNU较宽松通用公共许可证条款；
+   版本2.1或（您选择的）任何更高版本。
 
-   The GNU C Library is distributed in the hope that it will be useful,
-   but WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-   Lesser General Public License for more details.
+   GNU C库的分发希望它有用，
+   但不提供任何保证；甚至不提供适销性或
+   特定用途适用性的暗示保证。查看GNU
+   较宽松通用公共许可证了解更多详情。
 
-   You should have received a copy of the GNU Lesser General Public
-   License along with the GNU C Library; if not, see
-   <http://www.gnu.org/licenses/>.  */
+   您应该随GNU C库一起收到GNU较宽松通用公共许可证的副本；
+   如果没有，请查看 <http://www.gnu.org/licenses/>。 */
 
 #ifndef _ELF_H
 #define	_ELF_H 1
 
 __BEGIN_DECLS
 
-/* Standard ELF types.  */
+/* 标准ELF类型定义 */
 
 #include <stdint.h>
 
-/* Type for a 16-bit quantity.  */
-typedef uint16_t Elf32_Half;
-typedef uint16_t Elf64_Half;
+/* 16位数量的类型定义 */
+typedef uint16_t Elf32_Half;    // 32位ELF的16位类型
+typedef uint16_t Elf64_Half;    // 64位ELF的16位类型
 
-/* Types for signed and unsigned 32-bit quantities.  */
-typedef uint32_t Elf32_Word;
-typedef	int32_t  Elf32_Sword;
-typedef uint32_t Elf64_Word;
-typedef	int32_t  Elf64_Sword;
+/* 有符号和无符号32位数量的类型定义 */
+typedef uint32_t Elf32_Word;    // 32位ELF的32位无符号类型
+typedef	int32_t  Elf32_Sword;   // 32位ELF的32位有符号类型
+typedef uint32_t Elf64_Word;    // 64位ELF的32位无符号类型
+typedef	int32_t  Elf64_Sword;   // 64位ELF的32位有符号类型
 
-/* Types for signed and unsigned 64-bit quantities.  */
-typedef uint64_t Elf32_Xword;
-typedef	int64_t  Elf32_Sxword;
+/* 有符号和无符号64位数量的类型定义 */
+typedef uint64_t Elf32_Xword;   // 32位ELF的64位无符号类型
+typedef	int64_t  Elf32_Sxword;  // 32位ELF的64位有符号类型
 typedef uint64_t Elf64_Xword;
 typedef	int64_t  Elf64_Sxword;
 

@@ -1,36 +1,35 @@
-# Valiant Hearts Vita
+# Valiant Hearts PS Vita 移植版
 
 <p align="center"><img src="./screenshots/game.png"></p>
 
-This is a wrapper/port of <b>Valiant Hearts: The Great War</b> for the *PS Vita*.
+这是 **《英勇之心：伟大战争》** 在 PS Vita 平台上的包装器/移植版本。
 
-The port works by loading the official Android ARMv7 executable in memory, resolving its imports with native functions and patching it in order to properly run.
-By doing so, it's basically as if we emulate a minimalist Android environment in which we run natively the executable as it is.
+该移植通过将官方 Android ARMv7 可执行文件加载到内存中，使用本地函数解析其导入并对其进行修补以正常运行。通过这种方式，它基本上模拟了一个最小化的 Android 环境，在其中我们按原样本地运行可执行文件。
 
-## Notes
+## 注意事项
 
-- The loader has been tested with v.1.0.4b of the game.
-- It is possible to launch the game in lowend mode. This will ensure more stable framerate at the cost of graphical quality and sprites density.
+- 该加载器已使用游戏的 v.1.0.4b 版本进行测试。
+- 可以以低端模式启动游戏。这将确保更稳定的帧率，但会牺牲图形质量和精灵密度。
 
-## Changelog
+## 更新日志
 
 ### v1.1.1
 
-- Fixed a bug that might have caused memory leak issues.
-- Fixed Polish language detection.
+- 修复了可能导致内存泄漏问题的错误。
+- 修复了波兰语语言检测。
 
 ### v1.1
 
-- Added left analog support via simulated dpad presses.
-- Added multilanguage support.
+- 通过模拟十字键按压添加了左摇杆支持。
+- 添加了多语言支持。
 
 ### v1.0
 
-- Initial Release.
+- 初始发布。
 
-## Setup Instructions (For End Users)
+## 安装说明（终端用户）
 
-- Install [kubridge](https://github.com/TheOfficialFloW/kubridge/releases/) and [FdFix](https://github.com/TheOfficialFloW/FdFix/releases/) by copying `kubridge.skprx` and `fd_fix.skprx` to your taiHEN plugins folder (usually `ux0:tai`) and adding two entries to your `config.txt` under `*KERNEL`:
+- 通过将 `kubridge.skprx` 和 `fd_fix.skprx` 复制到您的 taiHEN 插件文件夹（通常是 `ux0:tai`）并在 `*KERNEL` 下的 `config.txt` 中添加两个条目来安装 [kubridge](https://github.com/TheOfficialFloW/kubridge/releases/) 和 [FdFix](https://github.com/TheOfficialFloW/FdFix/releases/)：
   
 ```
   *KERNEL
@@ -38,20 +37,20 @@ By doing so, it's basically as if we emulate a minimalist Android environment in
   ux0:tai/fd_fix.skprx
 ```
 
-**Note** Don't install fd_fix.skprx if you're using rePatch plugin
+**注意：** 如果您使用 rePatch 插件，请不要安装 fd_fix.skprx
 
-- **Optional**: Install [PSVshell](https://github.com/Electry/PSVshell/releases) to overclock your device to 500Mhz.
-- Install `libshacccg.suprx`, if you don't have it already, by following [this guide](https://samilops2.gitbook.io/vita-troubleshooting-guide/shader-compiler/extract-libshacccg.suprx).
-- Install the vpk from Release tab.
-- Obtain your copy of *Valiant Hearts: The Great War* legally for Android in form of an `.apk` file and an `.obb` file.
-- Open the apk with your zip explorer and extract the files `libuaf.so` from the `lib/armeabi-v7a` folder to `ux0:data/valiant`.
-- Place the obb file named as `main.obb` in `ux0:data/valiant`.
+- **可选：** 安装 [PSVshell](https://github.com/Electry/PSVshell/releases) 将您的设备超频到 500Mhz。
+- 如果您还没有 `libshacccg.suprx`，请按照 [此指南](https://samilops2.gitbook.io/vita-troubleshooting-guide/shader-compiler/extract-libshacccg.suprx) 安装它。
+- 从发布标签页安装 vpk 文件。
+- 合法获取 Android 版《英勇之心：伟大战争》的副本，格式为 `.apk` 文件和 `.obb` 文件。
+- 使用 zip 资源管理器打开 apk，从 `lib/armeabi-v7a` 文件夹中提取文件 `libuaf.so` 到 `ux0:data/valiant`。
+- 将 obb 文件重命名为 `main.obb` 并放置在 `ux0:data/valiant` 中。
 
-## Build Instructions (For Developers)
+## 构建说明（开发者）
 
-In order to build the loader, you'll need a [vitasdk](https://github.com/vitasdk) build fully compiled with softfp usage.  
-You can find a precompiled version here: https://github.com/vitasdk/buildscripts/actions/runs/1102643776.  
-Additionally, you'll need these libraries to be compiled as well with `-mfloat-abi=softfp` added to their CFLAGS:
+要构建加载器，您需要一个完全编译的 [vitasdk](https://github.com/vitasdk) 构建，并使用 softfp。  
+您可以在这里找到预编译版本：https://github.com/vitasdk/buildscripts/actions/runs/1102643776。  
+此外，您还需要将这些库编译为 softfp，在它们的 CFLAGS 中添加 `-mfloat-abi=softfp`：
 
 - [SDL2_vitagl](https://github.com/Northfear/SDL/tree/vitagl)
 
@@ -80,13 +79,59 @@ Additionally, you'll need these libraries to be compiled as well with `-mfloat-a
     make SOFTFP_ABI=1 HAVE_GLSL_SUPPORT=1 NO_DEBUG=1 install
     ````
 
-After all these requirements are met, you can compile the loader with the following commands:
+满足所有这些要求后，您可以使用以下命令编译加载器：
 
 ```bash
 mkdir build && cd build
 cmake .. && make
 ```
 
-## Credits
+## 快速 VPK 构建
 
-- TheFloW for the original .so loader.
+使用提供的脚本可以快速构建 VPK 文件：
+
+```bash
+./build_vpk.sh
+```
+
+该脚本将自动创建构建目录、配置项目并生成 VPK 文件。
+
+## 技术细节
+
+### 项目架构
+
+本项目采用 SO（共享对象）加载器技术，主要组成部分包括：
+
+- **SO 加载器**：负责加载和解析 Android .so 文件
+- **API 模拟层**：提供 Android 系统 API 的 PS Vita 实现
+- **图形适配**：通过 VitaGL 提供 OpenGL ES 兼容性
+- **音频系统**：使用 OpenSL ES 实现音频播放
+- **输入处理**：将 PS Vita 控制器输入映射到 Android 游戏控件
+
+### 支持功能
+
+- ✅ 完整的游戏流程
+- ✅ 多语言支持（自动检测系统语言）
+- ✅ 触摸屏控制
+- ✅ 物理按键控制
+- ✅ 左摇杆支持（模拟十字键）
+- ✅ 高/低画质模式切换
+- ✅ 音频播放
+- ✅ 存档系统
+
+### 性能优化
+
+- 使用 ARM NEON 指令集优化数学计算
+- 支持 CPU/GPU 超频以获得更好性能
+- 低端模式适配低性能设备
+- 内存使用优化，避免内存泄漏
+
+## 致谢
+
+- TheFloW 提供的原始 .so 加载器技术
+- Rinnegatamante 的 VitaGL 和相关工具
+- 所有为 PS Vita 自制软件生态系统做出贡献的开发者
+
+## 许可证
+
+本项目基于 MIT 许可证发布。详情请参阅 LICENSE 文件。

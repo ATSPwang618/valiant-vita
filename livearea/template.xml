@@ -1,5 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 
+<!-- Valiant Hearts PS Vita LiveArea 模板配置文件 -->
+<!-- 定义 PS Vita 主屏幕上应用程序的显示样式和交互元素 -->
+
 <livearea style="a1" format-ver="01.00" content-rev="1">
 	<livearea-background>
 		<image>bg0.png</image>
