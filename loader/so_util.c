@@ -1,9 +1,17 @@
-/* so_util.c -- utils to load and hook .so modules
+/* so_util.c -- 共享对象(.so)模块加载和钩子工具
  *
  * Copyright (C) 2021 Andy Nguyen
  *
  * This software may be modified and distributed under the terms
  * of the MIT license.	See the LICENSE file for details.
+ * 
+ * 本文件实现了Android共享对象文件的加载、解析、重定位和钩子功能
+ * 这是整个加载器系统的核心，负责：
+ * - ELF文件的内存映射和解析
+ * - 符号表的处理和符号解析
+ * - 重定位表的处理
+ * - ARM指令的运行时修补和钩子
+ * - 动态链接和初始化
  */
 
 #include <vitasdk.h>
@@ -17,104 +25,143 @@
 #include "dialog.h"
 #include "so_util.h"
 
+// PS Vita内核内存块类型定义：用户可执行内存
+// 此类型的内存块允许执行代码，用于存放SO文件的代码段
 #ifndef SCE_KERNEL_MEMBLOCK_TYPE_USER_RX
 #define SCE_KERNEL_MEMBLOCK_TYPE_USER_RX                 (0x0C20D050)
 #endif
 
+// ARM分支指令编码结构体
+// 用于解析和生成ARM分支(Branch)指令，支持条件分支和带链接的分支
 typedef struct b_enc {
 	union {
 		struct __attribute__((__packed__)) {
-			int imm24: 24;
-			unsigned int l: 1; // Branch with Link flag
-			unsigned int enc: 3; // 0b101
-			unsigned int cond: 4; // 0b1110
+			int imm24: 24;       // 24位立即数偏移（有符号）
+			unsigned int l: 1;    // 链接标志：0=分支，1=带链接分支(BL)
+			unsigned int enc: 3;  // 指令编码：固定为0b101
+			unsigned int cond: 4; // 条件码：0b1110表示无条件执行
 		} bits;
-		uint32_t raw;
+		uint32_t raw;            // 原始32位指令
 	};
 } b_enc;
 
+// ARM加载/存储指令编码结构体
+// 用于解析和生成ARM的LDR/STR等内存访问指令
 typedef struct ldst_enc {
 	union {
 		struct __attribute__((__packed__)) {
-			int imm12: 12;
-			unsigned int rt: 4; // Source/Destination register
-			unsigned int rn: 4; // Base register
-			unsigned int bit20_1: 1; // 0: store to memory, 1: load from memory
-			unsigned int w: 1; // 0: no write-back, 1: write address into base
-			unsigned int b: 1; // 0: word, 1: byte
-			unsigned int u: 1; // 0: subtract offset from base, 1: add to base
-			unsigned int p: 1; // 0: post indexing, 1: pre indexing
-			unsigned int enc: 3;
-			unsigned int cond: 4;
+			int imm12: 12;         // 12位立即数偏移
+			unsigned int rt: 4;     // 源/目标寄存器编号
+			unsigned int rn: 4;     // 基址寄存器编号
+			unsigned int bit20_1: 1; // 加载/存储标志：0=存储，1=加载
+			unsigned int w: 1;      // 写回标志：0=无写回，1=将地址写回基址寄存器
+			unsigned int b: 1;      // 数据宽度：0=字(32位)，1=字节(8位)
+			unsigned int u: 1;      // 偏移方向：0=从基址减去偏移，1=加上偏移
+			unsigned int p: 1;      // 索引模式：0=后索引，1=预索引
+			unsigned int enc: 3;    // 指令编码字段
+			unsigned int cond: 4;   // 条件执行码
 		} bits;
-		uint32_t raw;
+		uint32_t raw;              // 原始32位指令
 	};
 } ldst_enc;
 
-#define B_RANGE ((1 << 24) - 1)
-#define B_OFFSET(x) (x + 8) // branch jumps into addr - 8, so range is biased forward
+// ARM分支指令常量定义
+#define B_RANGE ((1 << 24) - 1)                    // 分支指令的最大跳转范围（24位）
+#define B_OFFSET(x) (x + 8)                        // 分支偏移修正（ARM流水线效应）
+// 分支指令生成宏：从PC跳转到DEST
 #define B(PC, DEST) ((b_enc){.bits = {.cond = 0b1110, .enc = 0b101, .l = 0, .imm24 = (((intptr_t)DEST-(intptr_t)PC) / 4) - 2}})
+// LDR指令生成宏：从RN+IMM地址加载数据到RT寄存器
 #define LDR_OFFS(RT, RN, IMM) ((ldst_enc){.bits = {.cond = 0b1110, .enc = 0b010, .p = 1, .u = (IMM >= 0), .b = 0, .w = 0, .bit20_1 = 1, .rn = RN, .rt = RT, .imm12 = (IMM >= 0) ? IMM : -IMM}})
 
-#define PATCH_SZ 0x10000 //64 KB-ish arenas
-static so_module *head = NULL, *tail = NULL;
+#define PATCH_SZ 0x10000 // 补丁区域大小：64KB的内存块
+static so_module *head = NULL, *tail = NULL; // 模块链表：头指针和尾指针
 
+// Thumb模式函数钩子实现
+// 在Thumb指令集函数的入口点安装跳转钩子
+// 参数：addr - 目标函数地址，dst - 钩子函数地址
+// 返回值：钩子信息结构体
 so_hook hook_thumb(uintptr_t addr, uintptr_t dst) {
 	so_hook h;
-	printf("THUMB HOOK\n");
+	printf("THUMB HOOK\n"); // 调试输出
 	if (addr == 0)
 		return;
-	h.thumb_addr = addr;
-	addr &= ~1;
+	
+	h.thumb_addr = addr;    // 保存原始Thumb地址（最低位为1）
+	addr &= ~1;             // 清除Thumb标志位，获得实际地址
+	
+	// 处理地址对齐：Thumb指令必须4字节对齐才能安装8字节钩子
 	if (addr & 2) {
-		uint16_t nop = 0xbf00;
+		uint16_t nop = 0xbf00; // Thumb NOP指令
 		kuKernelCpuUnrestrictedMemcpy((void *)addr, &nop, sizeof(nop));
-		addr += 2;
+		addr += 2;          // 跳过NOP，使用下一个4字节对齐位置
 		printf("THUMB UNALIGNED\n");
 	}
 	
 	h.addr = addr;
-	h.patch_instr[0] = 0xf000f8df; // LDR PC, [PC]
-	h.patch_instr[1] = dst;
+	// 构造Thumb钩子指令：LDR PC, [PC] + 目标地址
+	h.patch_instr[0] = 0xf000f8df; // LDR PC, [PC] - 从PC位置加载目标地址到PC
+	h.patch_instr[1] = dst;        // 目标地址常量
+	
+	// 备份原始指令并安装钩子
 	kuKernelCpuUnrestrictedMemcpy(&h.orig_instr, (void *)addr, sizeof(h.orig_instr));
 	kuKernelCpuUnrestrictedMemcpy((void *)addr, h.patch_instr, sizeof(h.patch_instr));
 
 	return h;
 }
 
+// ARM模式函数钩子实现
+// 在ARM指令集函数的入口点安装跳转钩子
+// 参数：addr - 目标函数地址，dst - 钩子函数地址
+// 返回值：钩子信息结构体
 so_hook hook_arm(uintptr_t addr, uintptr_t dst) {
-	printf("ARM HOOK\n");
+	printf("ARM HOOK\n"); // 调试输出
 	if (addr == 0)
 		return;
 	uint32_t hook[2];
 	so_hook h;
-	h.thumb_addr = 0;
+	h.thumb_addr = 0;      // ARM模式没有Thumb地址
 	h.addr = addr;
-	h.patch_instr[0] = 0xe51ff004; // LDR PC, [PC, #-0x4]
-	h.patch_instr[1] = dst;
+	
+	// 构造ARM钩子指令：LDR PC, [PC, #-4] + 目标地址
+	h.patch_instr[0] = 0xe51ff004; // LDR PC, [PC, #-4] - 从PC-4位置加载目标地址
+	h.patch_instr[1] = dst;        // 目标地址常量
+	
+	// 备份原始指令并安装钩子
 	kuKernelCpuUnrestrictedMemcpy(&h.orig_instr, (void *)addr, sizeof(h.orig_instr));
 	kuKernelCpuUnrestrictedMemcpy((void *)addr, h.patch_instr, sizeof(h.patch_instr));
 
 	return h;
 }
 
+// 自动检测地址类型并安装相应钩子
+// 根据地址的最低位判断是ARM还是Thumb模式
+// 参数：addr - 目标函数地址，dst - 钩子函数地址
+// 返回值：钩子信息结构体
 so_hook hook_addr(uintptr_t addr, uintptr_t dst) {
 	if (addr == 0)
 		return;
 	if (addr & 1)
-		return hook_thumb(addr, dst);
+		return hook_thumb(addr, dst); // 最低位为1：Thumb模式
 	else
-		return hook_arm(addr, dst);
+		return hook_arm(addr, dst);   // 最低位为0：ARM模式
 }
 
+// 刷新SO模块的指令缓存
+// 确保代码修改被正确写入内存并使指令缓存失效
+// 参数：mod - 目标模块
 void so_flush_caches(so_module *mod) {
 	kuKernelFlushCaches((void *)mod->text_base, mod->text_size);
 }
 
+// 内部SO加载函数：从内存中解析和映射ELF文件
+// 这是SO加载的核心函数，处理ELF文件的解析和内存映射
+// 参数：mod - 模块结构体，so_blockid - 内存块ID，so_data - SO文件数据，load_addr - 加载地址
+// 返回值：成功返回0，失败返回负值
 int _so_load(so_module *mod, SceUID so_blockid, void *so_data, uintptr_t load_addr) {
 	int res = 0;
 	uintptr_t data_addr = 0;
 	
+	// 验证ELF魔数：检查文件是否为有效的ELF格式
 	if (memcmp(so_data, ELFMAG, SELFMAG) != 0) {
 		res = -1;
 		goto err_free_so;
