@@ -14,7 +14,7 @@
 
 // 外部引用：主要的 SO 模块对象
 // 这个全局变量存储加载的游戏主模块信息
-extern so_module fahrenheit_mod;
+extern so_module main_mod;
 
 // 调试输出函数声明
 // 用于在调试模式下输出格式化的调试信息
