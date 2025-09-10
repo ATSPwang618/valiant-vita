@@ -167,133 +167,160 @@ int _so_load(so_module *mod, SceUID so_blockid, void *so_data, uintptr_t load_ad
 		goto err_free_so;
 	}
 
-	mod->ehdr = (Elf32_Ehdr *)so_data;
-	mod->phdr = (Elf32_Phdr *)((uintptr_t)so_data + mod->ehdr->e_phoff);
-	mod->shdr = (Elf32_Shdr *)((uintptr_t)so_data + mod->ehdr->e_shoff);
+	// 解析ELF文件头和各种表的指针
+	mod->ehdr = (Elf32_Ehdr *)so_data;              // ELF文件头
+	mod->phdr = (Elf32_Phdr *)((uintptr_t)so_data + mod->ehdr->e_phoff); // 程序头表
+	mod->shdr = (Elf32_Shdr *)((uintptr_t)so_data + mod->ehdr->e_shoff); // 节头表
 
+	// 节名字符串表：存储所有节名称的字符串表
 	mod->shstr = (char *)((uintptr_t)so_data + mod->shdr[mod->ehdr->e_shstrndx].sh_offset);
 
+	// 遍历程序头表：处理需要加载的段(PT_LOAD类型)
 	for (int i = 0; i < mod->ehdr->e_phnum; i++) {
 		if (mod->phdr[i].p_type == PT_LOAD) {
 			void *prog_data;
 			size_t prog_size;
 
+			// 检查是否为可执行段（代码段）
 			if ((mod->phdr[i].p_flags & PF_X) == PF_X) {
-				// Allocate arena for code patches, trampolines, etc
-				// Sits exactly under the desired allocation space
+				// 为代码段分配内存：包括补丁区域、跳转代码等
+				// 补丁区域位于期望分配空间的正下方
 				mod->patch_size = ALIGN_MEM(PATCH_SZ, mod->phdr[i].p_align);
 				SceKernelAllocMemBlockKernelOpt opt;
 				memset(&opt, 0, sizeof(SceKernelAllocMemBlockKernelOpt));
 				opt.size = sizeof(SceKernelAllocMemBlockKernelOpt);
 				opt.attr = 0x1;
-				opt.field_C = (SceUInt32)load_addr - mod->patch_size;
+				opt.field_C = (SceUInt32)load_addr - mod->patch_size; // 补丁区域地址
 				res = mod->patch_blockid = kuKernelAllocMemBlock("rx_block", SCE_KERNEL_MEMBLOCK_TYPE_USER_RX, mod->patch_size, &opt);
 				if (res < 0)
 					goto err_free_so;
 
 				sceKernelGetMemBlockBase(mod->patch_blockid, &mod->patch_base);
-				mod->patch_head = mod->patch_base;
+				mod->patch_head = mod->patch_base; // 补丁区域当前分配指针
 				
+				// 分配代码段内存
 				prog_size = ALIGN_MEM(mod->phdr[i].p_memsz, mod->phdr[i].p_align);
 				memset(&opt, 0, sizeof(SceKernelAllocMemBlockKernelOpt));
 				opt.size = sizeof(SceKernelAllocMemBlockKernelOpt);
 				opt.attr = 0x1;
-				opt.field_C = (SceUInt32)load_addr;
+				opt.field_C = (SceUInt32)load_addr;  // 代码段的目标地址
 				res = mod->text_blockid = kuKernelAllocMemBlock("rx_block", SCE_KERNEL_MEMBLOCK_TYPE_USER_RX, prog_size, &opt);
 				if (res < 0)
 					goto err_free_so;
 
 				sceKernelGetMemBlockBase(mod->text_blockid, &prog_data);
 
+				// 更新程序头中的虚拟地址为实际分配的地址
 				mod->phdr[i].p_vaddr += (Elf32_Addr)prog_data;
 
+				// 保存代码段信息
 				mod->text_base = mod->phdr[i].p_vaddr;
 				mod->text_size = mod->phdr[i].p_memsz;
 		
-				// Use the .text segment padding as a code cave
-				// Word-align it to make it simpler for instruction arena allocation
+				// 使用代码段的填充空间作为代码洞穴(code cave)
+				// 字对齐以简化指令区域分配
 				mod->cave_size = ALIGN_MEM(prog_size - mod->phdr[i].p_memsz, 0x4);
 				mod->cave_base = mod->cave_head = prog_data + mod->phdr[i].p_memsz;
 				mod->cave_base = ALIGN_MEM(mod->cave_base, 0x4);
 				mod->cave_head = mod->cave_base;
 				printf("code cave: %d bytes (@0x%08X).\n", mod->cave_size, mod->cave_base);
 
-				data_addr = (uintptr_t)prog_data + prog_size;
+				data_addr = (uintptr_t)prog_data + prog_size; // 记录数据段的起始地址
 			} else {
+				// 处理数据段(非可执行段)
 				if (data_addr == 0)
 					goto err_free_so;
 
+				// 检查数据段数量是否超过最大限制
 				if (mod->n_data >= MAX_DATA_SEG)
 					goto err_free_data;
 
+				// 计算数据段所需大小（考虑地址对齐）
 				prog_size = ALIGN_MEM(mod->phdr[i].p_memsz + mod->phdr[i].p_vaddr - (data_addr - mod->text_base), mod->phdr[i].p_align);
 
+				// 分配数据段内存（读写权限）
 				SceKernelAllocMemBlockKernelOpt opt;
 				memset(&opt, 0, sizeof(SceKernelAllocMemBlockKernelOpt));
 				opt.size = sizeof(SceKernelAllocMemBlockKernelOpt);
 				opt.attr = 0x1;
-				opt.field_C = (SceUInt32)data_addr;
+				opt.field_C = (SceUInt32)data_addr; // 数据段地址
 				res = mod->data_blockid[mod->n_data] = kuKernelAllocMemBlock("rw_block", SCE_KERNEL_MEMBLOCK_TYPE_USER_RW, prog_size, &opt);
 				if (res < 0)
 					goto err_free_text;
 
 				sceKernelGetMemBlockBase(mod->data_blockid[mod->n_data], &prog_data);
-				data_addr = (uintptr_t)prog_data + prog_size;
+				data_addr = (uintptr_t)prog_data + prog_size; // 更新下一段地址
 
+				// 更新虚拟地址为实际地址
 				mod->phdr[i].p_vaddr += (Elf32_Addr)mod->text_base;
 
 				mod->data_base[mod->n_data] = mod->phdr[i].p_vaddr;
 				mod->data_size[mod->n_data] = mod->phdr[i].p_memsz;
-				mod->n_data++;
+				mod->n_data++; // 增加数据段计数
 			}
 
+			// 初始化未映射的内存区域（BSS段等）
+			// 分配并清零prog_size - p_filesz部分的内存
 			char *zero = malloc(prog_size - mod->phdr[i].p_filesz);
 			memset(zero, 0, prog_size - mod->phdr[i].p_filesz);
 			kuKernelCpuUnrestrictedMemcpy(prog_data + mod->phdr[i].p_filesz, zero, prog_size - mod->phdr[i].p_filesz);
 			free(zero);
 
+			// 复制文件中的实际数据到内存
 			kuKernelCpuUnrestrictedMemcpy((void *)mod->phdr[i].p_vaddr, (void *)((uintptr_t)so_data + mod->phdr[i].p_offset), mod->phdr[i].p_filesz);
 		}
 	}
 
+	// 解析节头表：查找动态链接相关的重要节
 	for (int i = 0; i < mod->ehdr->e_shnum; i++) {
-		char *sh_name = mod->shstr + mod->shdr[i].sh_name;
-		uintptr_t sh_addr = mod->text_base + mod->shdr[i].sh_addr;
-		size_t sh_size = mod->shdr[i].sh_size;
+		char *sh_name = mod->shstr + mod->shdr[i].sh_name;           // 节名称
+		uintptr_t sh_addr = mod->text_base + mod->shdr[i].sh_addr;   // 节的内存地址
+		size_t sh_size = mod->shdr[i].sh_size;                      // 节的大小
+		
 		if (strcmp(sh_name, ".dynamic") == 0) {
+			// 动态段：包含动态链接器需要的信息
 			mod->dynamic = (Elf32_Dyn *)sh_addr;
 			mod->num_dynamic = sh_size / sizeof(Elf32_Dyn);
 		} else if (strcmp(sh_name, ".dynstr") == 0) {
+			// 动态字符串表：存储符号名称
 			mod->dynstr = (char *)sh_addr;
 		} else if (strcmp(sh_name, ".dynsym") == 0) {
+			// 动态符号表：存储导入/导出符号信息
 			mod->dynsym = (Elf32_Sym *)sh_addr;
 			mod->num_dynsym = sh_size / sizeof(Elf32_Sym);
 		} else if (strcmp(sh_name, ".rel.dyn") == 0) {
+			// 数据重定位表：需要重定位的数据引用
 			mod->reldyn = (Elf32_Rel *)sh_addr;
 			mod->num_reldyn = sh_size / sizeof(Elf32_Rel);
 		} else if (strcmp(sh_name, ".rel.plt") == 0) {
+			// PLT重定位表：需要重定位的函数调用
 			mod->relplt = (Elf32_Rel *)sh_addr;
 			mod->num_relplt = sh_size / sizeof(Elf32_Rel);
 		} else if (strcmp(sh_name, ".init_array") == 0) {
+			// 初始化函数数组：模块加载时需要调用的函数
 			mod->init_array = (void *)sh_addr;
 			mod->num_init_array = sh_size / sizeof(void *);
 		} else if (strcmp(sh_name, ".hash") == 0) {
+			// 符号哈希表：用于快速符号查找
 			mod->hash = (void *)sh_addr;
 		}
 	}
 
+	// 验证必需的动态链接信息是否存在
 	if (mod->dynamic == NULL ||
 		mod->dynstr == NULL ||
 		mod->dynsym == NULL ||
 		mod->reldyn == NULL ||
 		mod->relplt == NULL) {
-		res = -2;
+		res = -2; // 缺少必需的动态链接信息
 		goto err_free_data;
 	}
 
+	// 解析动态段中的额外信息
 	for (int i = 0; i < mod->num_dynamic; i++) {
 		switch (mod->dynamic[i].d_tag) {
 		case DT_SONAME:
+			// 共享对象名称
 			mod->soname = mod->dynstr + mod->dynamic[i].d_un.d_ptr;
 			break;
 		default:
@@ -301,18 +328,20 @@ int _so_load(so_module *mod, SceUID so_blockid, void *so_data, uintptr_t load_ad
 		}
 	}
 
-	sceKernelFreeMemBlock(so_blockid);
+	sceKernelFreeMemBlock(so_blockid); // 释放原始SO文件数据的内存块
 
+	// 将模块添加到全局模块链表
 	if (!head && !tail) {
-		head = mod;
+		head = mod;       // 第一个模块
 		tail = mod;
 	} else {
-		tail->next = mod;
+		tail->next = mod; // 添加到链表尾部
 		tail = mod;
 	}
 
-	return 0;
+	return 0; // 成功
 
+// 错误处理：释放已分配的内存
 err_free_data:
 	for (int i = 0; i < mod->n_data; i++)
 		sceKernelFreeMemBlock(mod->data_blockid[i]);
@@ -321,54 +350,72 @@ err_free_text:
 err_free_so:
 	sceKernelFreeMemBlock(so_blockid);
 
-	return res;
+	return res; // 返回错误码
 }
 
+// 从内存缓冲区加载SO模块
+// 用于加载已经在内存中的SO文件数据
+// 参数：mod - 模块结构体，buffer - SO文件数据缓冲区，so_size - 数据大小，load_addr - 加载地址
+// 返回值：成功返回0，失败返回负值
 int so_mem_load(so_module *mod, void *buffer, size_t so_size, uintptr_t load_addr) {
 	SceUID so_blockid;
 	void *so_data;
 
-	memset(mod, 0, sizeof(so_module));
+	memset(mod, 0, sizeof(so_module)); // 清空模块结构体
 
+	// 为SO文件数据分配内存块（页对齐）
 	so_blockid = sceKernelAllocMemBlock("so block", SCE_KERNEL_MEMBLOCK_TYPE_USER_RW, (so_size + 0xfff) & ~0xfff, NULL);
 	if (so_blockid < 0)
 		return so_blockid;
 
 	sceKernelGetMemBlockBase(so_blockid, &so_data);
-	sceClibMemcpy(so_data, buffer, so_size);
+	sceClibMemcpy(so_data, buffer, so_size); // 复制SO数据到内存块
 	
-	return _so_load(mod, so_blockid, so_data, load_addr);
+	return _so_load(mod, so_blockid, so_data, load_addr); // 调用内部加载函数
 }
 
+// 从文件加载SO模块
+// 读取SO文件并加载到内存中
+// 参数：mod - 模块结构体，filename - SO文件路径，load_addr - 加载地址
+// 返回值：成功返回0，失败返回负值
 int so_file_load(so_module *mod, const char *filename, uintptr_t load_addr) {
 	SceUID so_blockid;
 	void *so_data;
 
-	memset(mod, 0, sizeof(so_module));
+	memset(mod, 0, sizeof(so_module)); // 清空模块结构体
 
+	// 打开SO文件
 	SceUID fd = sceIoOpen(filename, SCE_O_RDONLY, 0);
 	if (fd < 0)
 		return fd;
 
+	// 获取文件大小
 	size_t so_size = sceIoLseek(fd, 0, SCE_SEEK_END);
 	sceIoLseek(fd, 0, SCE_SEEK_SET);
 
+	// 分配内存块存储文件内容
 	so_blockid = sceKernelAllocMemBlock("so block", SCE_KERNEL_MEMBLOCK_TYPE_USER_RW, (so_size + 0xfff) & ~0xfff, NULL);
 	if (so_blockid < 0)
 		return so_blockid;
 
 	sceKernelGetMemBlockBase(so_blockid, &so_data);
 
+	// 读取文件内容到内存
 	sceIoRead(fd, so_data, so_size);
 	sceIoClose(fd);
 
-	return _so_load(mod, so_blockid, so_data, load_addr);
+	return _so_load(mod, so_blockid, so_data, load_addr); // 调用内部加载函数
 }
 
+// 执行SO模块的重定位
+// 处理所有需要重定位的符号引用，修正地址偏移
+// 参数：mod - 目标模块
+// 返回值：成功返回0，失败返回负值
 int so_relocate(so_module *mod) {
+	// 遍历所有重定位条目（包括数据重定位和PLT重定位）
 	for (int i = 0; i < mod->num_reldyn + mod->num_relplt; i++) {
 		Elf32_Rel *rel = i < mod->num_reldyn ? &mod->reldyn[i] : &mod->relplt[i - mod->num_reldyn];
-		Elf32_Sym *sym = &mod->dynsym[ELF32_R_SYM(rel->r_info)];
+		Elf32_Sym *sym = &mod->dynsym[ELF32_R_SYM(rel->r_info)]; // 获取相关符号
 		uintptr_t *ptr = (uintptr_t *)(mod->text_base + rel->r_offset);
 
 		int type = ELF32_R_TYPE(rel->r_info);
