@@ -1,35 +1,55 @@
 /*********************************************************************
-* Filename:   sha1.h
-* Author:     Brad Conte (brad AT bradconte.com)
-* Copyright:
-* Disclaimer: This code is presented "as is" without any guarantees.
-* Details:    Defines the API for the corresponding SHA1 implementation.
+* 文件名:     sha1.h
+* 作者:       Brad Conte (brad AT bradconte.com)
+* 版权:       
+* 免责声明:   此代码按"原样"提供，不提供任何保证。
+* 详细说明:   定义相应SHA1实现的API接口。
+* 
+* SHA1哈希算法头文件
+* 
+* 本文件定义了SHA1哈希算法的数据结构和函数接口
+* SHA1算法产生160位(20字节)的消息摘要，广泛用于密码学和数据完整性验证
 *********************************************************************/
 
 #ifndef SHA1_H
 #define SHA1_H
 
-/*************************** HEADER FILES ***************************/
+/*************************** 头文件包含 ***************************/
 #include <stddef.h>
 
-/****************************** MACROS ******************************/
-#define SHA1_BLOCK_SIZE 20              // SHA1 outputs a 20 byte digest
+/****************************** 宏定义 ******************************/
+// SHA1输出摘要的字节长度 - 固定为20字节(160位)
+#define SHA1_BLOCK_SIZE 20              
 
-/**************************** DATA TYPES ****************************/
-typedef unsigned char BYTE;             // 8-bit byte
-typedef unsigned int  WORD;             // 32-bit word, change to "long" for 16-bit machines
+/**************************** 数据类型定义 ****************************/
+typedef unsigned char BYTE;             // 8位字节类型
+typedef unsigned int  WORD;             // 32位字类型，16位机器上改为"long"
 
+// SHA1算法上下文结构体
+// 包含算法执行过程中需要维护的所有状态信息
 typedef struct {
-	BYTE data[64];
-	WORD datalen;
-	unsigned long long bitlen;
-	WORD state[5];
-	WORD k[4];
+	BYTE data[64];                      // 数据缓冲区：存储当前正在处理的64字节数据块
+	WORD datalen;                       // 数据长度：当前缓冲区中的有效字节数
+	unsigned long long bitlen;          // 位长度：已处理的总位数，用于最终填充
+	WORD state[5];                      // 算法状态：5个32位状态寄存器(H0-H4)
+	WORD k[4];                          // 常量数组：SHA1算法中使用的4个轮常量
 } SHA1_CTX;
 
-/*********************** FUNCTION DECLARATIONS **********************/
+/*********************** 函数声明 **********************/
+
+// 初始化SHA1上下文
+// 设置初始哈希值和其他状态变量为标准初值
+// 参数：ctx - 指向SHA1上下文结构体的指针
 void sha1_init(SHA1_CTX *ctx);
+
+// 更新SHA1哈希计算
+// 处理新的输入数据，可以多次调用以处理大量数据
+// 参数：ctx - SHA1上下文，data - 输入数据数组，len - 数据长度
 void sha1_update(SHA1_CTX *ctx, const BYTE data[], size_t len);
+
+// 完成SHA1哈希计算
+// 执行最终的填充和处理，输出最终的20字节哈希值
+// 参数：ctx - SHA1上下文，hash - 输出哈希值的20字节缓冲区
 void sha1_final(SHA1_CTX *ctx, BYTE hash[]);
 
 #endif   // SHA1_H

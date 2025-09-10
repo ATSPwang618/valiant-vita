@@ -1,18 +1,34 @@
-/* main.c -- Valiant Hearts .so loader
+/* main.c -- Valiant Hearts 英勇之心游戏 SO 加载器主文件
  *
  * Copyright (C) 2025 Rinnegatamante
  *
  * This software may be modified and distributed under the terms
  * of the MIT license.	See the LICENSE file for details.
+ * 
+ * 本文件是 Valiant Hearts PS Vita 移植项目的核心主文件
+ * 
+ * 项目功能概述：
+ * - 加载并运行 Android 版《英勇之心：伟大战争》的原生 ARM 代码
+ * - 提供完整的 Android 系统 API 模拟环境
+ * - 实现图形、音频、输入和文件系统的适配
+ * - 支持多语言、触控操作和模拟摇杆
+ * 
+ * 技术实现：
+ * - 使用 SO 加载器动态加载 Android .so 文件
+ * - 通过函数钩子将 Android API 调用重定向到 PS Vita 实现
+ * - 利用 VitaGL 提供 OpenGL ES 兼容性
+ * - 使用 kubridge 实现内核级内存操作
  */
 
-#include <vitasdk.h>
-#include <kubridge.h>
-#include <vitashark.h>
-#include <vitaGL.h>
-#include <zlib.h>
-#include <zip.h>
+// === 系统和库头文件包含 ===
+#include <vitasdk.h>       // PS Vita SDK 核心功能
+#include <kubridge.h>      // 内核桥接功能
+#include <vitashark.h>     // GPU 着色器编译器
+#include <vitaGL.h>        // OpenGL ES 兼容层
+#include <zlib.h>          // 压缩库
+#include <zip.h>           // ZIP 文件处理
 
+// 标准 C 库
 #include <malloc.h>
 #include <stdio.h>
 #include <stdarg.h>
@@ -20,15 +36,17 @@
 #include <string.h>
 #include <dirent.h>
 #include <unistd.h>
-#include <pthread.h>
-#include <wchar.h>
+#include <pthread.h>       // 多线程支持
+#include <wchar.h>         // 宽字符支持
 #include <wctype.h>
 #include <locale.h>
 #include <setjmp.h>
 
+// 数学库
 #include <math.h>
-#include <math_neon.h>
+#include <math_neon.h>     // ARM NEON 优化数学函数
 
+// 系统调用和文件操作
 #include <errno.h>
 #include <ctype.h>
 #include <setjmp.h>
@@ -37,73 +55,108 @@
 #include <sys/types.h>
 #include <fcntl.h>
 
+// 项目内部头文件
 #include "main.h"
 #include "config.h"
 #include "dialog.h"
 #include "so_util.h"
 #include "sha1.h"
 
-#include <SLES/OpenSLES.h>
-#include <SLES/OpenSLES_Android.h>
+// 音频库
+#include <SLES/OpenSLES.h>         // OpenSL ES 音频标准
+#include <SLES/OpenSLES_Android.h> // Android 扩展
 
-#include "vorbis/vorbisfile.h"
+#include "vorbis/vorbisfile.h"     // Ogg Vorbis 音频解码
 
-//#define ENABLE_DEBUG
+// === 调试配置 ===
+//#define ENABLE_DEBUG    // 取消注释以启用详细调试输出
 
 #ifdef ENABLE_DEBUG
-#define dlog sceClibPrintf
+#define dlog sceClibPrintf    // 调试模式：输出到控制台
 #else
-#define dlog
+#define dlog                  // 发布模式：禁用调试输出
 #endif
 
-extern const char *BIONIC_ctype_;
-extern const short *BIONIC_tolower_tab_;
-extern const short *BIONIC_toupper_tab_;
+// === 外部符号引用 ===
+// Android Bionic C 库兼容性符号（在 ctype_patch.c 中定义）
+extern const char *BIONIC_ctype_;        // 字符类型表
+extern const short *BIONIC_tolower_tab_; // 小写转换表
+extern const short *BIONIC_toupper_tab_; // 大写转换表
 
-static char data_path[256];
+// === 全局变量定义 ===
+static char data_path[256];      // 游戏数据路径（通常是 ux0:data/valiant）
 
-static char fake_vm[0x1000];
-static char fake_env[0x1000];
+// Android 虚拟机和环境模拟
+static char fake_vm[0x1000];     // 伪造的 JavaVM 结构体缓冲区
+static char fake_env[0x1000];    // 伪造的 JNI 环境缓冲区
 
-int framecap = 0;
+int framecap = 0;                // 帧率限制标志
 
+// 文件存在性检查函数
+// 检查指定路径的文件或目录是否存在
+// 参数：path - 文件路径
+// 返回值：存在返回非零值，不存在返回0
 int file_exists(const char *path) {
 	SceIoStat stat;
 	return sceIoGetstat(path, &stat) >= 0;
 }
 
+// newlib 堆大小配置：设置为 256MB
+// 这为游戏提供足够的内存空间
 int _newlib_heap_size_user = 256 * 1024 * 1024;
 
-so_module main_mod;
+so_module main_mod;              // 主游戏模块对象
 
+// === 内存操作包装函数 ===
+// 这些函数将标准 C 库的内存操作重定向到 PS Vita 优化版本
+
+// 内存复制包装函数
 void *__wrap_memcpy(void *dest, const void *src, size_t n) {
 	return sceClibMemcpy(dest, src, n);
 }
 
+// 内存移动包装函数（支持重叠内存区域）
 void *__wrap_memmove(void *dest, const void *src, size_t n) {
 	return sceClibMemmove(dest, src, n);
 }
 
+// 返回常量4的占位函数
+// 用于某些需要特定返回值的系统调用替换
 int ret4() { return 4; }
 
+// 内存设置包装函数
 void *__wrap_memset(void *s, int c, size_t n) {
 	return sceClibMemset(s, c, n);
 }
 
+// 获取当前工作目录的钩子函数
+// Android 游戏调用 getcwd() 时返回游戏数据目录
+// 参数：buf - 缓冲区，size - 缓冲区大小
+// 返回值：指向缓冲区的指针
 char *getcwd_hook(char *buf, size_t size) {
-	strcpy(buf, data_path);
+	strcpy(buf, data_path);  // 返回游戏数据路径
 	return buf;
 }
 
+// POSIX 对齐内存分配函数
+// 分配按指定边界对齐的内存块
+// 参数：memptr - 返回的内存指针，alignment - 对齐边界，size - 内存大小
+// 返回值：成功返回0，失败返回错误码
 int posix_memalign(void **memptr, size_t alignment, size_t size) {
 	*memptr = memalign(alignment, size);
 	return 0;
 }
 
+// === Android 日志系统模拟 ===
+// 这些函数模拟 Android 的日志输出系统
+
+// Android 日志打印函数（带优先级）
+// 参数：prio - 日志优先级，tag - 日志标签，fmt - 格式化字符串，... - 参数
+// 返回值：总是返回0
 int __android_log_print(int prio, const char *tag, const char *fmt, ...) {
 #ifdef ENABLE_DEBUG
 	va_list list;
-	static char string[0x8000];
+	static char string[0x8000];  // 32KB 日志缓冲区
 
 	va_start(list, fmt);
 	vsprintf(string, fmt, list);
@@ -114,36 +167,47 @@ int __android_log_print(int prio, const char *tag, const char *fmt, ...) {
 	return 0;
 }
 
+// Android 日志写入函数（简化版）
+// 参数：prio - 日志优先级，tag - 日志标签，fmt - 格式化字符串，... - 参数
+// 返回值：总是返回0
 int __android_log_write(int prio, const char *tag, const char *fmt, ...) {
 #ifdef ENABLE_DEBUG
 	va_list list;
-	static char string[0x8000];
+	static char string[0x8000];  // 32KB 日志缓冲区
 
 	va_start(list, fmt);
 	vsprintf(string, fmt, list);
 	va_end(list);
 
-	sceClibPrintf("[LOGW] %s: %s\n", tag, string);
+	sceClibPrintf("[LOGW] %s: %s\n", tag, string);  // LOGW = Log Write
 #endif
 	return 0;
 }
 
+// Android 日志可变参数打印函数
+// 参数：prio - 日志优先级，tag - 日志标签，fmt - 格式化字符串，list - 参数列表
+// 返回值：总是返回0
 int __android_log_vprint(int prio, const char *tag, const char *fmt, va_list list) {
 #ifdef ENABLE_DEBUG
-	static char string[0x8000];
+	static char string[0x8000];  // 32KB 日志缓冲区
 
 	vsprintf(string, fmt, list);
 	va_end(list);
 
-	sceClibPrintf("[LOGV] %s: %s\n", tag, string);
+	sceClibPrintf("[LOGV] %s: %s\n", tag, string);  // LOGV = Log Variable
 #endif
 	return 0;
 }
 
+// === 通用占位函数 ===
+// 用于替换某些不需要实际功能的系统调用
+
+// 返回0的占位函数
 int ret0(void) {
 	return 0;
 }
 
+// 返回1的占位函数
 int ret1(void) {
 	return 1;
 }
@@ -1873,106 +1937,133 @@ void *pthread_main(void *arg) {
 	return NULL;
 }
 
+// === 程序主入口函数 ===
+// 整个 Valiant Hearts PS Vita 移植项目的入口点
+// 负责初始化系统、加载游戏、设置环境并启动游戏循环
+// 参数：argc - 命令行参数数量，argv - 命令行参数数组
+// 返回值：程序退出码
 int main(int argc, char *argv[]) {
-	SceAppUtilInitParam init_param;
-	SceAppUtilBootParam boot_param;
+	// === PS Vita 应用程序初始化 ===
+	SceAppUtilInitParam init_param;   // 应用程序初始化参数
+	SceAppUtilBootParam boot_param;   // 应用程序启动参数
 	memset(&init_param, 0, sizeof(SceAppUtilInitParam));
 	memset(&boot_param, 0, sizeof(SceAppUtilBootParam));
-	sceAppUtilInit(&init_param, &boot_param);
+	sceAppUtilInit(&init_param, &boot_param); // 初始化应用程序工具
 	
+	// === 检查启动模式 ===
+	// 检测是否以低端模式启动（性能优化模式）
 	SceAppUtilAppEventParam eventParam;
 	memset(&eventParam, 0, sizeof(SceAppUtilAppEventParam));
 	sceAppUtilReceiveAppEvent(&eventParam);
-	if (eventParam.type == 0x05) { // Game launched in lowend mode
-		is_lowend = 1;
+	if (eventParam.type == 0x05) { // 检查事件类型：低端模式启动
+		is_lowend = 1;              // 启用低端模式标志
 	}
 	
-	//sceSysmoduleLoadModule(SCE_SYSMODULE_RAZOR_CAPTURE);
+	// === 可选调试功能 ===
+	// 以下代码用于崩溃调试，正常发布时应保持注释状态
+	//sceSysmoduleLoadModule(SCE_SYSMODULE_RAZOR_CAPTURE);  // 加载调试模块
 	//SceUID crasher_thread = sceKernelCreateThread("crasher", crasher, 0x40, 0x1000, 0, 0, NULL);
-	//sceKernelStartThread(crasher_thread, 0, NULL);	
+	//sceKernelStartThread(crasher_thread, 0, NULL);
 	
-	sceCtrlSetSamplingMode(SCE_CTRL_MODE_ANALOG_WIDE);
-	sceTouchSetSamplingState(SCE_TOUCH_PORT_FRONT, SCE_TOUCH_SAMPLING_STATE_START);
+	// === 输入系统初始化 ===
+	sceCtrlSetSamplingMode(SCE_CTRL_MODE_ANALOG_WIDE);              // 设置控制器采样模式（支持模拟摇杆）
+	sceTouchSetSamplingState(SCE_TOUCH_PORT_FRONT, SCE_TOUCH_SAMPLING_STATE_START); // 启用前置触摸屏
 
-	scePowerSetArmClockFrequency(444);
-	scePowerSetBusClockFrequency(222);
-	scePowerSetGpuClockFrequency(222);
-	scePowerSetGpuXbarClockFrequency(166);
+	// === 性能调优 ===
+	// 设置 PS Vita 各组件的时钟频率以获得最佳性能
+	scePowerSetArmClockFrequency(444);      // ARM CPU 频率：444MHz
+	scePowerSetBusClockFrequency(222);      // 总线频率：222MHz
+	scePowerSetGpuClockFrequency(222);      // GPU 频率：222MHz
+	scePowerSetGpuXbarClockFrequency(166);  // GPU 交叉开关频率：166MHz
 
+	// === 依赖项检查 ===
+	// 验证必需的系统组件是否已安装
 	if (check_kubridge() < 0)
-		fatal_error("Error kubridge.skprx is not installed.");
+		fatal_error("Error kubridge.skprx is not installed.");    // 检查内核桥接插件
 
 	if (!file_exists("ur0:/data/libshacccg.suprx") && !file_exists("ur0:/data/external/libshacccg.suprx"))
-		fatal_error("Error libshacccg.suprx is not installed.");
+		fatal_error("Error libshacccg.suprx is not installed."); // 检查着色器编译器库
 	
+	// === 游戏文件加载 ===
 	char fname[256];
-	sprintf(data_path, "ux0:data/valiant");
+	sprintf(data_path, "ux0:data/valiant");   // 设置游戏数据目录
 	
-	sceClibPrintf("Loading libuaf\n");
-	sprintf(fname, "%s/libuaf.so", data_path);
+	sceClibPrintf("Loading libuaf\n");        // 输出加载状态
+	sprintf(fname, "%s/libuaf.so", data_path); // 构造 SO 文件路径
 	if (so_file_load(&main_mod, fname, LOAD_ADDRESS) < 0)
-		fatal_error("Error could not load %s.", fname);
-	so_relocate(&main_mod);
-	so_resolve(&main_mod, default_dynlib, sizeof(default_dynlib), 0);
-
-	vglSetSemanticBindingMode(VGL_MODE_POSTPONED);
-	vglUseTripleBuffering(GL_FALSE);
-	vglInitExtended(0, SCREEN_W, SCREEN_H, 8 * 1024 * 1024, SCE_GXM_MULTISAMPLE_NONE);
-
-	patch_game();
-	so_flush_caches(&main_mod);
-	so_initialize(&main_mod);
+		fatal_error("Error could not load %s.", fname);  // 加载失败则报错退出
 	
-	memset(fake_vm, 'A', sizeof(fake_vm));
-	*(uintptr_t *)(fake_vm + 0x00) = (uintptr_t)fake_vm; // just point to itself...
-	*(uintptr_t *)(fake_vm + 0x10) = (uintptr_t)ret0;
-	*(uintptr_t *)(fake_vm + 0x14) = (uintptr_t)ret0;
-	*(uintptr_t *)(fake_vm + 0x18) = (uintptr_t)GetEnv;
+	// === 模块处理和符号解析 ===
+	so_relocate(&main_mod);                                    // 执行重定位：修正地址偏移
+	so_resolve(&main_mod, default_dynlib, sizeof(default_dynlib), 0); // 解析符号：链接外部函数
 
-	memset(fake_env, 'A', sizeof(fake_env));
-	*(uintptr_t *)(fake_env + 0x00) = (uintptr_t)fake_env; // just point to itself...
-	*(uintptr_t *)(fake_env + 0x18) = (uintptr_t)FindClass;
-	*(uintptr_t *)(fake_env + 0x4C) = (uintptr_t)ret0; // PushLocalFrame
-	*(uintptr_t *)(fake_env + 0x50) = (uintptr_t)ret0; // PopLocalFrame
-	*(uintptr_t *)(fake_env + 0x54) = (uintptr_t)NewGlobalRef;
-	*(uintptr_t *)(fake_env + 0x58) = (uintptr_t)DeleteGlobalRef;
-	*(uintptr_t *)(fake_env + 0x5C) = (uintptr_t)ret0; // DeleteLocalRef
-	*(uintptr_t *)(fake_env + 0x74) = (uintptr_t)NewObjectV;
-	*(uintptr_t *)(fake_env + 0x7C) = (uintptr_t)GetObjectClass;
-	*(uintptr_t *)(fake_env + 0x84) = (uintptr_t)GetMethodID;
-	*(uintptr_t *)(fake_env + 0x8C) = (uintptr_t)CallObjectMethodV;
-	*(uintptr_t *)(fake_env + 0x98) = (uintptr_t)CallBooleanMethodV;
-	*(uintptr_t *)(fake_env + 0xC8) = (uintptr_t)CallIntMethodV;
-	*(uintptr_t *)(fake_env + 0xD4) = (uintptr_t)CallLongMethodV;
-	*(uintptr_t *)(fake_env + 0xF8) = (uintptr_t)CallVoidMethodV;
-	*(uintptr_t *)(fake_env + 0x178) = (uintptr_t)GetFieldID;
-	*(uintptr_t *)(fake_env + 0x17C) = (uintptr_t)GetBooleanField;
-	*(uintptr_t *)(fake_env + 0x190) = (uintptr_t)GetIntField;
-	*(uintptr_t *)(fake_env + 0x198) = (uintptr_t)GetFloatField;
-	*(uintptr_t *)(fake_env + 0x1C4) = (uintptr_t)GetStaticMethodID;
-	*(uintptr_t *)(fake_env + 0x1CC) = (uintptr_t)CallStaticObjectMethodV;
-	*(uintptr_t *)(fake_env + 0x1D8) = (uintptr_t)CallStaticBooleanMethodV;
-	*(uintptr_t *)(fake_env + 0x208) = (uintptr_t)CallStaticIntMethodV;
-	*(uintptr_t *)(fake_env + 0x21C) = (uintptr_t)CallStaticLongMethodV;
-	*(uintptr_t *)(fake_env + 0x220) = (uintptr_t)CallStaticFloatMethodV;
-	*(uintptr_t *)(fake_env + 0x238) = (uintptr_t)CallStaticVoidMethodV;
-	*(uintptr_t *)(fake_env + 0x240) = (uintptr_t)GetStaticFieldID;
-	*(uintptr_t *)(fake_env + 0x244) = (uintptr_t)GetStaticObjectField;
-	*(uintptr_t *)(fake_env + 0x29C) = (uintptr_t)NewStringUTF;
-	*(uintptr_t *)(fake_env + 0x2A0) = (uintptr_t)GetStringUTFLength;
-	*(uintptr_t *)(fake_env + 0x2A4) = (uintptr_t)GetStringUTFChars;
-	*(uintptr_t *)(fake_env + 0x2A8) = (uintptr_t)ret0; // ReleaseStringUTFChars
-	*(uintptr_t *)(fake_env + 0x2AC) = (uintptr_t)GetArrayLength;
-	*(uintptr_t *)(fake_env + 0x2B4) = (uintptr_t)GetObjectArrayElement;
-	*(uintptr_t *)(fake_env + 0x35C) = (uintptr_t)ret0; // RegisterNatives
-	*(uintptr_t *)(fake_env + 0x36C) = (uintptr_t)GetJavaVM;
-	*(uintptr_t *)(fake_env + 0x374) = (uintptr_t)GetStringUTFRegion;
+	// === 图形系统初始化 ===
+	vglSetSemanticBindingMode(VGL_MODE_POSTPONED);            // 设置语义绑定模式：延迟绑定
+	vglUseTripleBuffering(GL_FALSE);                          // 禁用三重缓冲（提高性能）
+	vglInitExtended(0, SCREEN_W, SCREEN_H, 8 * 1024 * 1024, SCE_GXM_MULTISAMPLE_NONE); // 初始化 VitaGL
 
-	pthread_t t2;
-	pthread_attr_t attr2;
-	pthread_attr_init(&attr2);
-	pthread_attr_setstacksize(&attr2, 2 * 1024 * 1024);
-	pthread_create(&t2, &attr2, pthread_main, NULL);
+	// === 游戏特定补丁和初始化 ===
+	patch_game();                                             // 应用游戏特定的代码补丁
+	so_flush_caches(&main_mod);                               // 刷新指令缓存
+	so_initialize(&main_mod);                                 // 调用模块初始化函数
 
-	return sceKernelExitDeleteThread(0);
+	// === Android JNI 环境模拟 ===
+	// 构造伪造的 Java VM 结构体，用于 Android 游戏的 JNI 调用
+	memset(fake_vm, 'A', sizeof(fake_vm));                   // 填充缓冲区
+	*(uintptr_t *)(fake_vm + 0x00) = (uintptr_t)fake_vm;      // 自引用指针
+	*(uintptr_t *)(fake_vm + 0x10) = (uintptr_t)ret0;        // 占位函数
+	*(uintptr_t *)(fake_vm + 0x14) = (uintptr_t)ret0;        // 占位函数
+	*(uintptr_t *)(fake_vm + 0x18) = (uintptr_t)GetEnv;      // GetEnv 函数指针
+
+	// 构造伪造的 JNI 环境结构体，模拟完整的 Android JNI 接口
+	memset(fake_env, 'A', sizeof(fake_env));                 // 填充缓冲区
+	*(uintptr_t *)(fake_env + 0x00) = (uintptr_t)fake_env;    // 自引用指针
+	*(uintptr_t *)(fake_env + 0x18) = (uintptr_t)FindClass;  // 查找 Java 类
+	*(uintptr_t *)(fake_env + 0x4C) = (uintptr_t)ret0;       // PushLocalFrame - 局部引用帧管理
+	*(uintptr_t *)(fake_env + 0x50) = (uintptr_t)ret0;       // PopLocalFrame
+	*(uintptr_t *)(fake_env + 0x54) = (uintptr_t)NewGlobalRef;    // 创建全局引用
+	*(uintptr_t *)(fake_env + 0x58) = (uintptr_t)DeleteGlobalRef; // 删除全局引用
+	*(uintptr_t *)(fake_env + 0x5C) = (uintptr_t)ret0;       // DeleteLocalRef - 删除局部引用
+	*(uintptr_t *)(fake_env + 0x74) = (uintptr_t)NewObjectV; // 创建 Java 对象
+	*(uintptr_t *)(fake_env + 0x7C) = (uintptr_t)GetObjectClass;  // 获取对象类
+	*(uintptr_t *)(fake_env + 0x84) = (uintptr_t)GetMethodID;     // 获取方法 ID
+	*(uintptr_t *)(fake_env + 0x8C) = (uintptr_t)CallObjectMethodV;   // 调用对象方法（返回对象）
+	*(uintptr_t *)(fake_env + 0x98) = (uintptr_t)CallBooleanMethodV;  // 调用对象方法（返回布尔值）
+	*(uintptr_t *)(fake_env + 0xC8) = (uintptr_t)CallIntMethodV;      // 调用对象方法（返回整数）
+	*(uintptr_t *)(fake_env + 0xD4) = (uintptr_t)CallLongMethodV;     // 调用对象方法（返回长整数）
+	*(uintptr_t *)(fake_env + 0xF8) = (uintptr_t)CallVoidMethodV;     // 调用对象方法（无返回值）
+	*(uintptr_t *)(fake_env + 0x178) = (uintptr_t)GetFieldID;        // 获取字段 ID
+	*(uintptr_t *)(fake_env + 0x17C) = (uintptr_t)GetBooleanField;   // 获取布尔字段
+	*(uintptr_t *)(fake_env + 0x190) = (uintptr_t)GetIntField;       // 获取整数字段
+	*(uintptr_t *)(fake_env + 0x198) = (uintptr_t)GetFloatField;     // 获取浮点字段
+	*(uintptr_t *)(fake_env + 0x1C4) = (uintptr_t)GetStaticMethodID; // 获取静态方法 ID
+	*(uintptr_t *)(fake_env + 0x1CC) = (uintptr_t)CallStaticObjectMethodV;   // 调用静态方法（返回对象）
+	*(uintptr_t *)(fake_env + 0x1D8) = (uintptr_t)CallStaticBooleanMethodV;  // 调用静态方法（返回布尔值）
+	*(uintptr_t *)(fake_env + 0x208) = (uintptr_t)CallStaticIntMethodV;      // 调用静态方法（返回整数）
+	*(uintptr_t *)(fake_env + 0x21C) = (uintptr_t)CallStaticLongMethodV;     // 调用静态方法（返回长整数）
+	*(uintptr_t *)(fake_env + 0x220) = (uintptr_t)CallStaticFloatMethodV;    // 调用静态方法（返回浮点数）
+	*(uintptr_t *)(fake_env + 0x238) = (uintptr_t)CallStaticVoidMethodV;     // 调用静态方法（无返回值）
+	*(uintptr_t *)(fake_env + 0x240) = (uintptr_t)GetStaticFieldID;         // 获取静态字段 ID
+	*(uintptr_t *)(fake_env + 0x244) = (uintptr_t)GetStaticObjectField;     // 获取静态对象字段
+	*(uintptr_t *)(fake_env + 0x29C) = (uintptr_t)NewStringUTF;             // 创建 UTF 字符串
+	*(uintptr_t *)(fake_env + 0x2A0) = (uintptr_t)GetStringUTFLength;       // 获取 UTF 字符串长度
+	*(uintptr_t *)(fake_env + 0x2A4) = (uintptr_t)GetStringUTFChars;        // 获取 UTF 字符串字符
+	*(uintptr_t *)(fake_env + 0x2A8) = (uintptr_t)ret0;      // ReleaseStringUTFChars - 释放字符串
+	*(uintptr_t *)(fake_env + 0x2AC) = (uintptr_t)GetArrayLength;           // 获取数组长度
+	*(uintptr_t *)(fake_env + 0x2B4) = (uintptr_t)GetObjectArrayElement;    // 获取对象数组元素
+	*(uintptr_t *)(fake_env + 0x35C) = (uintptr_t)ret0;      // RegisterNatives - 注册本地方法
+	*(uintptr_t *)(fake_env + 0x36C) = (uintptr_t)GetJavaVM; // 获取 Java VM 指针
+	*(uintptr_t *)(fake_env + 0x374) = (uintptr_t)GetStringUTFRegion;       // 获取字符串 UTF 区域
+
+	// === 游戏主线程启动 ===
+	// 创建游戏的主执行线程，使用足够的栈空间
+	pthread_t t2;                                            // 线程句柄
+	pthread_attr_t attr2;                                    // 线程属性
+	pthread_attr_init(&attr2);                               // 初始化线程属性
+	pthread_attr_setstacksize(&attr2, 2 * 1024 * 1024);     // 设置栈大小为 2MB
+	pthread_create(&t2, &attr2, pthread_main, NULL);        // 创建游戏主线程
+
+	// === 程序退出 ===
+	// 主线程退出，游戏在 pthread_main 中继续运行
+	return sceKernelExitDeleteThread(0);                     // 删除当前线程并退出
 }
